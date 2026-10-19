@@ -396,6 +396,7 @@ def intervene_cbm(
                 intervention_strategy = define_strategy(
                     strategy, train_loader, model, device, config, propagation
                 )
+                print("USING FOLLOWING PROPAGATION:", propagation)
             except:
                 print(
                     f"Intervention strategy {strategy} with policy {policy} and propagation {propagation} not implemented for model {config.model.model}."
@@ -474,7 +475,7 @@ def intervene_cbm(
                         "intervention/num_concepts_intervened": 0,
                     }
                 )
-            prints = f"Intervention on {0} concepts: "
+            prints = f"[{propagation}] Intervention on {0} concepts: "
             for key, value in metrics_dict.items():
                 prints += f"{key}: {value:.3f} "
             print(prints)
@@ -631,7 +632,7 @@ def intervene_cbm(
                             "intervention/num_concepts_intervened": num_intervened,
                         }
                     )
-                prints = f"Intervention on {num_intervened} concepts: "
+                prints = f"[{propagation}] Intervention on {num_intervened} concepts: "
                 for key, value in metrics_dict.items():
                     prints += f"{key}: {value:.3f} "
                 print(prints)
