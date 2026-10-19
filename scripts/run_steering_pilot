@@ -1,0 +1,29 @@
+#!/bin/bash
+
+# Preliminary experiment for steering-based propagation of interventions on CUB with a single seed.
+# The soft CBM is trained once and evaluated without propagation ('none'), with independently ('steer_independent')
+# and with jointly ('steer_joint') computed steering step sizes. The SCBM serves as reference.
+# All runs use the empirical percentile strategy and the random policy, s.t. the curves differ only in the propagation.
+# Curves are logged to wandb as intervention_emp_perc_random[_{propagation}]/...
+
+eval "$(conda shell.bash hook)"
+export CUBLAS_WORKSPACE_CONFIG=":4096:8"
+export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:$LIBRARY_PATH"
+export LDFLAGS=-L/usr/local/cuda/lib64/stub
+
+
+tag='steering_pilot'
+project='propagateCBM'
+mem='20G'
+seed=42
+data='CUB'
+encoder_arch='resnet18'
+j_epochs=300 # Default for CUB, lower (e.g. 100) for faster results
+strategy='emp_perc'
+policy='random'
+
+# Soft CBM with steering propagation
+sbatch --mem=$mem train.sh +model=CBM +data=$data model.concept_learning='soft' model.inter_propagation="'none,steer_independent,steer_joint'" model.inter_strategy=$strategy model.inter_policy=$policy experiment_name="${data}_CBM_soft_steering_pilot_${seed}" seed=$seed logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch model.j_epochs=$j_epochs
+
+# SCBM reference
+sbatch --mem=$mem train.sh +model=SCBM +data=$data model.cov_type='amortized' model.reg_precision='l1' model.reg_weight=1 model.inter_strategy=$strategy model.inter_policy=$policy experiment_name="${data}_SCBM_amortized_pilot_${seed}" seed=$seed logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch model.j_epochs=$j_epochs

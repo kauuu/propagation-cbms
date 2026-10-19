@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# Compares steering-based propagation of interventions in hard & soft CBMs to SCBMs.
+# Each CBM run trains once and evaluates the intervention curves without propagation ('none'),
+# with independently ('steer_independent') and with jointly ('steer_joint') computed steering step sizes.
+# Curves are logged to wandb as intervention_{strategy}_{policy}[_{propagation}]/...
+
+eval "$(conda shell.bash hook)"
+export CUBLAS_WORKSPACE_CONFIG=":4096:8"
+export LIBRARY_PATH="/usr/local/cuda/lib64/stubs:$LIBRARY_PATH"
+export LDFLAGS=-L/usr/local/cuda/lib64/stub
+
+
+tag='steering_experiments'
+project='SCBM'
+propagation="'none,steer_independent,steer_joint'" # Inner quotes s.t. Hydra parses the comma-separated list as a string instead of a sweep
+mem='20G'
+for i in 42 73 666 777 1009 1279 1597 1811 1949 2053
+do
+  ### Synthetic data
+  data='synthetic'
+  encoder_arch='FCNN'
+
+  # CBMs with steering propagation
+  for concept_learning in 'hard' 'soft'
+  do
+    sbatch --mem=$mem train.sh +model=CBM +data=$data model.concept_learning=$concept_learning model.inter_propagation=$propagation experiment_name="${data}_CBM_${concept_learning}_steering_${i}" seed=$i logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch model.j_epochs=150 model.c_epochs=100 model.t_epochs=50
+  done;
+
+  # SCBM
+  sbatch --mem=$mem train.sh +model=SCBM +data=$data model.cov_type='amortized' model.reg_precision='l1' model.reg_weight=1 experiment_name="${data}_SCBM_amortized_${i}" seed=$i logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch model.j_epochs=150 model.c_epochs=100 model.t_epochs=50
+  sbatch --mem=$mem train.sh +model=SCBM +data=$data model.cov_type='global' model.reg_precision=None experiment_name="${data}_SCBM_global_${i}" seed=$i logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch model.j_epochs=150 model.c_epochs=100 model.t_epochs=50
+
+  ### CUB data
+  data='CUB'
+  encoder_arch='resnet18'
+
+  # CBMs with steering propagation
+  for concept_learning in 'hard' 'soft'
+  do
+    sbatch --mem=$mem train.sh +model=CBM +data=$data model.concept_learning=$concept_learning model.inter_propagation=$propagation experiment_name="${data}_CBM_${concept_learning}_steering_${i}" seed=$i logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch
+  done;
+
+  # SCBM
+  sbatch --mem=$mem train.sh +model=SCBM +data=$data model.cov_type='amortized' model.reg_precision='l1' model.reg_weight=1 experiment_name="${data}_SCBM_amortized_${i}" seed=$i logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch
+  sbatch --mem=$mem train.sh +model=SCBM +data=$data model.cov_type='global' model.reg_precision=None experiment_name="${data}_SCBM_global_${i}" seed=$i logging.project=$project logging.mode=offline model.tag=$tag model.encoder_arch=$encoder_arch
+done;

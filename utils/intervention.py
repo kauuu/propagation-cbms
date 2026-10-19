@@ -15,6 +15,9 @@ import wandb
 from utils.minimize_constraint import minimize_constr
 from utils.utils import numerical_stability_check
 
+# Steering propagation modes for CBMs and how the step sizes of intervened-on concepts are combined
+STEERING_MODES = {"steer_independent": "independent", "steer_joint": "joint"}
+
 
 def intervene_scbm(
     train_loader, test_loader, model, metrics, epoch, config, loss_fn, device
@@ -342,28 +345,60 @@ def intervene_cbm(
     model.eval()
     policies = config.model.inter_policy.split(",")
     strategies = config.model.inter_strategy.split(",")
+    propagations = config.model.get("inter_propagation", "none").split(",")
     num_interventions = min(200, config.data.num_concepts)
-    if config.model.model == "cbm" and config.model.concept_learning in (
-        "hard",
-        "autoregressive",
-        "embedding",
-    ):
-        strategies = ["hard"]
-    # Intervening with different strategies
+
+    # Determine the combinations of propagation and strategy to evaluate
+    runs = []
+    for propagation in propagations:
+        if propagation == "none":
+            if config.model.model == "cbm" and config.model.concept_learning in (
+                "hard",
+                "autoregressive",
+                "embedding",
+            ):
+                runs += [(propagation, "hard")]
+            else:
+                runs += [(propagation, strategy) for strategy in strategies]
+        elif propagation in STEERING_MODES and config.model.concept_learning in (
+            "hard",
+            "soft",
+        ):
+            # With steering, the strategy defines the target confidence of intervened-on concepts
+            runs += [(propagation, strategy) for strategy in strategies]
+        else:
+            print(
+                f"Propagation {propagation} not implemented for model {config.model.model} with concept learning {config.model.concept_learning}."
+            )
+
+    # Intervening with different propagations and strategies
     first_intervention = True
-    for strategy in strategies:
+    steering = None
+    for propagation, strategy in runs:
+        if propagation in STEERING_MODES and steering is None:
+            # Steering directions are shared across steering modes, strategies and policies
+            steering = SteeringPropagation(
+                train_loader,
+                model,
+                device,
+                eps=float(config.model.get("steer_eps", 1e-6)),
+                ridge=float(config.model.get("steer_ridge", 1e-3)),
+            )
         # Intervening with different policies
         for policy in policies:
             intervention_dataset_base = []
+            log_name = f"intervention_{strategy}_{policy}"
+            if propagation != "none":
+                log_name += f"_{propagation}"
 
             try:
                 intervention_policy = define_policy(policy)
                 intervention_strategy = define_strategy(
-                    strategy, train_loader, model, device, config
+                    strategy, train_loader, model, device, config, propagation
                 )
             except:
                 print(
-                    f"Intervention strategy {strategy} with policy {policy} not implemented for model {config.model.model}."
+                    f"Intervention strategy {strategy} with policy {policy} and propagation {propagation} not implemented for model {config.model.model}."
                 )
                 continue
 
@@ -380,7 +415,10 @@ def intervene_cbm(
                         concepts_pred_probs,
                         target_pred_logits,
                         concepts_hard,
-                    ) = model(batch_features, epoch, validation=True)
+                        intermediate,
+                    ) = model(
+                        batch_features, epoch, validation=True, return_intermediate=True
+                    )
                     if config.model.concept_learning == "autoregressive":
                         concepts_pred_probs_m = torch.mean(
                             concepts_pred_probs, dim=-1
@@ -413,6 +451,7 @@ def intervene_cbm(
                             batch_features.cpu(),
                             concepts_hard.cpu(),
                             concepts_pred_probs_m.cpu(),
+                            intermediate.cpu(),
                         ]
                     )
 
@@ -426,12 +465,12 @@ def intervene_cbm(
                 first_intervention = False
             for i, (k, v) in enumerate(metrics_dict.items()):
                 wandb.define_metric(
-                    f"intervention_{strategy}_{policy}/{k}",
+                    f"{log_name}/{k}",
                     step_metric="intervention/num_concepts_intervened",
                 )
                 wandb.log(
                     {
-                        f"intervention_{strategy}_{policy}/{k}": v,
+                        f"{log_name}/{k}": v,
                         "intervention/num_concepts_intervened": 0,
                     }
                 )
@@ -454,10 +493,15 @@ def intervene_cbm(
             ]
 
             concepts_dataset_mask = torch.zeros_like(intervention_dataset_base[1])
+            # Concept probabilities the policy selects on. Without propagation, these are the original predictions,
+            # with propagation they are updated after each intervention step (as for SCBMs)
+            concepts_dataset_policy_probs = intervention_dataset_base[0]
 
             for num_intervened in range(1, num_interventions + 1):
                 intervention_dataset = TensorDataset(
-                    *intervention_dataset_base, concepts_dataset_mask
+                    *intervention_dataset_base,
+                    concepts_dataset_policy_probs,
+                    concepts_dataset_mask,
                 )
                 intervention_loader = DataLoader(
                     intervention_dataset,
@@ -466,6 +510,7 @@ def intervene_cbm(
                     shuffle=False,
                 )
                 concepts_dataset_mask_new = []
+                concepts_dataset_policy_probs_new = []
 
                 with torch.no_grad():
                     for k, batch in tqdm(
@@ -478,6 +523,8 @@ def intervene_cbm(
                             input_features,
                             concepts_hard,
                             concepts_pred_probs_m,
+                            intermediate,
+                            concepts_policy_probs,
                             concepts_mask,
                         ) = [item.to(device) for item in batch]
 
@@ -514,16 +561,39 @@ def intervene_cbm(
                             concepts_mask_new = (
                                 intervention_policy.compute_intervention_mask(
                                     concepts_mask,
-                                    concepts_pred_probs=concepts_pred_probs,
+                                    concepts_pred_probs=concepts_policy_probs,
                                 )
                             )
-                            concepts_interv_probs = (
-                                intervention_strategy.compute_intervention_cbm(
-                                    concepts_pred_probs,
+                            if propagation in STEERING_MODES:
+                                # Propagate intervention to other concepts by steering the encoder representation
+                                concepts_steered_probs = steering.propagate(
+                                    intermediate,
                                     concepts_true,
                                     concepts_mask_new,
+                                    intervention_strategy.target_probs(concepts_true),
+                                    combine=STEERING_MODES[propagation],
                                 )
-                            )
+                                if config.model.concept_learning == "hard":
+                                    concepts_interv_probs = HardCBMStrategy().compute_intervention_cbm(
+                                        concepts_steered_probs,
+                                        concepts_true,
+                                        concepts_mask_new,
+                                    )
+                                else:
+                                    concepts_interv_probs = intervention_strategy.compute_intervention_cbm(
+                                        concepts_steered_probs,
+                                        concepts_true,
+                                        concepts_mask_new,
+                                    )
+                                concepts_policy_probs = concepts_interv_probs
+                            else:
+                                concepts_interv_probs = (
+                                    intervention_strategy.compute_intervention_cbm(
+                                        concepts_pred_probs,
+                                        concepts_true,
+                                        concepts_mask_new,
+                                    )
+                                )
                             target_pred_logits = model.intervene(
                                 concepts_interv_probs,
                                 concepts_mask_new,
@@ -549,6 +619,7 @@ def intervene_cbm(
                             concepts_interv_probs,
                         )
                         concepts_dataset_mask_new.append(concepts_mask_new)
+                        concepts_dataset_policy_probs_new.append(concepts_policy_probs)
 
                 # Calculate and log metrics
                 metrics_dict = metrics.compute(validation=True, config=config)
@@ -556,7 +627,7 @@ def intervene_cbm(
                 for i, (k, v) in enumerate(metrics_dict.items()):
                     wandb.log(
                         {
-                            f"intervention_{strategy}_{policy}/{k}": v,
+                            f"{log_name}/{k}": v,
                             "intervention/num_concepts_intervened": num_intervened,
                         }
                     )
@@ -566,9 +637,12 @@ def intervene_cbm(
                 print(prints)
                 print()
                 metrics.reset()
-                # Updating mask
+                # Updating mask and policy probabilities
                 concepts_dataset_mask = torch.cat(
                     concepts_dataset_mask_new, dim=0
+                ).cpu()
+                concepts_dataset_policy_probs = torch.cat(
+                    concepts_dataset_policy_probs_new, dim=0
                 ).cpu()
     return
 
@@ -674,7 +748,9 @@ class ProbUncertaintyInterventionPolicy:
         return concepts_mask
 
 
-def define_strategy(inter_strategy, train_loader, model, device, config):
+def define_strategy(
+    inter_strategy, train_loader, model, device, config, propagation="none"
+):
     """
     Return the intervention strategy that determines how the ground-truth intervened-on concept values are encoded in the model.
     This function selects and returns the appropriate intervention strategy based on the provided strategy name and model configuration.
@@ -688,6 +764,8 @@ def define_strategy(inter_strategy, train_loader, model, device, config):
         model (torch.nn.Module): The model to be evaluated.
         device (torch.device): The device to run the computations on.
         config (dict): Configuration dictionary containing model and data settings.
+        propagation (str, optional): The propagation of interventions for CBMs. With steering propagation, hard CBMs use
+                                     the percentile strategies to define the steering targets. Default is "none".
 
     Returns:
         object: An instance of the selected intervention strategy class.
@@ -700,13 +778,23 @@ def define_strategy(inter_strategy, train_loader, model, device, config):
         USING FOLLOWING STRATEGY: PercentileStrategy
     """
     if config.model.model == "cbm":
-        if config.model.concept_learning in ("hard", "autoregressive", "embedding"):
+        if config.model.concept_learning in ("autoregressive", "embedding") or (
+            config.model.concept_learning == "hard" and propagation == "none"
+        ):
             inter_strategy = HardCBMStrategy()
         elif inter_strategy == "simple_perc":
             inter_strategy = PercentileStrategy()
         elif inter_strategy == "emp_perc":
             inter_strategy = EmpiricalPercentileStrategy(
                 train_loader=train_loader, model=model, device=device
+            )
+        else:
+            raise NotImplementedError(
+                "No such strategy as",
+                inter_strategy,
+                "defined for model",
+                config.model.model,
+                "!",
             )
         print("USING FOLLOWING STRATEGY:", inter_strategy.__class__.__name__)
 
@@ -912,8 +1000,11 @@ class PercentileStrategy:
     def __init__(self):
         pass
 
+    def target_probs(self, c_true):
+        return 0.05 + 0.9 * c_true
+
     def _compute_intervened_probs(self, c_true, c_mask):
-        return (0.05 + 0.9 * c_true) * c_mask
+        return self.target_probs(c_true) * c_mask
 
     def compute_intervened_logits(self, c_mu, c_cov, c_true, c_mask):
         c_intervened_probs = self._compute_intervened_probs(c_true, c_mask)
@@ -945,13 +1036,15 @@ class EmpiricalPercentileStrategy:
             concept_pred, q=torch.tensor([0.05, 0.95]), dim=0
         ).to(device)
 
-    def _compute_intervened_perc(self, c_true, c_mask):
-        c_true_pred_perc = torch.where(
+    def target_probs(self, c_true):
+        return torch.where(
             c_true == 1,
             self.concept_pred_percentiles[1, :],
             self.concept_pred_percentiles[0, :],
         )
-        return c_true_pred_perc * c_mask
+
+    def _compute_intervened_perc(self, c_true, c_mask):
+        return self.target_probs(c_true) * c_mask
 
     def compute_intervened_logits(self, c_mu, c_cov, c_true, c_mask):
         c_intervened_probs = self._compute_intervened_perc(c_true, c_mask)
@@ -1137,3 +1230,130 @@ class HardCBMStrategy:
     def compute_intervention_cbm(self, c_pred, c_true, c_mask):
         c_intervened = c_true * c_mask + c_pred * (1 - c_mask)
         return c_intervened
+
+
+class SteeringPropagation:
+    """
+    Propagation of interventions in CBMs by steering the encoder representation along concept directions.
+
+    For each concept k, the steering direction is the mean difference of the encoder representations h(x) of training samples
+    where the concept is active and where it is inactive: v_k = mean(h | c_k=1) - mean(h | c_k=0).
+    When intervening, the representation is shifted as h' = h + sum_k alpha_k v_k over the intervened-on concepts, such that
+    their logits reach the target confidence of the intervention strategy. As all concepts are predicted from the shifted
+    representation, the intervention also affects the non-intervened concepts.
+
+    Since the concept predictor is linear, logit_k(h') = logit_k(h) + sum_j alpha_j A[k,j] with A = W V^T, where A[k,j] = w_k·v_j
+    is how much steering along concept j moves the logit of concept k.
+
+    Args:
+        train_loader (torch.utils.data.DataLoader): DataLoader for the training data. Used for computing the steering directions.
+        model (torch.nn.Module): The CBM with a linear concept predictor (hard or soft).
+        device (torch.device): The device to run the computations on.
+        eps (float, optional): Concepts with w_k·v_k below eps are degenerate and not steered.
+        ridge (float, optional): Relative ridge damping of the joint solve.
+    """
+
+    def __init__(self, train_loader, model, device, eps=1e-6, ridge=1e-3):
+        self.concept_predictor = model.concept_predictor
+        self.act_c = nn.Sigmoid()
+        self.eps = eps
+        self.ridge = ridge
+
+        # Mean encoder representation of samples with active and inactive concepts
+        sum_pos, sum_neg, n_pos, n_neg = 0, 0, 0, 0
+        with torch.no_grad():
+            for k, batch in enumerate(train_loader):
+                h = model.encoder(batch["features"].to(device)).double()
+                c = batch["concepts"].to(device).double()
+                sum_pos = sum_pos + c.T @ h  # [C,D]
+                sum_neg = sum_neg + (1 - c).T @ h
+                n_pos = n_pos + c.sum(0)  # [C]
+                n_neg = n_neg + (1 - c).sum(0)
+        self.V = sum_pos / n_pos.clamp_min(1).unsqueeze(1) - sum_neg / n_neg.clamp_min(
+            1
+        ).unsqueeze(1)  # [C,D]
+
+        # Interaction matrix A[k,j] = w_k·v_j
+        self.A = self.concept_predictor.weight.double() @ self.V.T  # [C,C]
+
+        # Concepts whose predictor is not aligned with their direction (or that never/always occur) are not steered
+        self.valid = (self.A.diagonal() > eps) & (n_pos > 0) & (n_neg > 0)  # [C]
+        print(
+            f"STEERING: {int((~self.valid).sum())} of {self.valid.numel()} concepts are degenerate and will not be steered"
+        )
+
+    def propagate(self, h, c_true, c_mask, target_probs, combine="joint"):
+        """
+        Steer the encoder representation towards the intervened-on concept values and predict all concepts from it.
+
+        Args:
+            h (torch.Tensor): The original encoder representation. Shape: (batch_size, n_features)
+            c_true (torch.Tensor): The ground-truth concept values. Shape: (batch_size, num_concepts)
+            c_mask (torch.Tensor): A mask indicating which concepts are intervened-on. Shape: (batch_size, num_concepts)
+            target_probs (torch.Tensor): The target probabilities of the intervened-on concepts. Shape: (batch_size, num_concepts)
+            combine (str, optional): How the step sizes are determined. "independent" computes each step size separately,
+                                     ignoring the effect of the other steers. "joint" solves for all step sizes at once,
+                                     s.t. all intervened-on concepts reach their targets simultaneously.
+
+        Returns:
+            torch.Tensor: The concept probabilities predicted from the steered representation. Shape: (batch_size, num_concepts)
+        """
+        c_true = c_true.double()
+        c_mask = c_mask.double()
+        h = h.double()
+        logits = h @ self.concept_predictor.weight.double().T + self.concept_predictor.bias.double()
+
+        # Required logit change, not pulling back concepts that are already beyond their target in the correct direction
+        delta = torch.logit(target_probs.double(), eps=1e-6) - logits
+        satisfied = torch.where(c_true == 1, delta <= 0, delta >= 0)
+        delta = torch.where(satisfied, torch.zeros_like(delta), delta)
+        steer_mask = c_mask * self.valid.double()  # [B,C]
+
+        if combine == "independent":
+            alpha = self._alpha_independent(delta, steer_mask)
+        elif combine == "joint":
+            alpha = self._alpha_joint(delta, c_mask, steer_mask)
+        else:
+            raise NotImplementedError("No such steering combination as", combine, "!")
+
+        h_steered = h + alpha @ self.V
+        logits_steered = (
+            h_steered @ self.concept_predictor.weight.double().T
+            + self.concept_predictor.bias.double()
+        )
+        return self.act_c(logits_steered).to(torch.float32)
+
+    def _alpha_independent(self, delta, steer_mask):
+        # alpha_k = delta_k / (w_k·v_k), ignoring how the other steers move concept k
+        diag = torch.where(self.valid, self.A.diagonal(), torch.ones_like(self.A.diagonal()))
+        return steer_mask * delta / diag
+
+    def _alpha_joint(self, delta, c_mask, steer_mask):
+        # Solve A_II alpha_I = delta_I for the intervened-on concepts I with ridge damping:
+        # (A_II^T A_II + lambda I) alpha_I = A_II^T delta_I
+        n_intervened = int(c_mask.sum(1)[0])
+        alpha = torch.zeros_like(delta)
+        if n_intervened == 0:
+            return alpha
+
+        # Gather the intervened-on block of the interaction matrix per sample
+        indices = torch.argsort(c_mask, dim=1, descending=True, stable=True)[
+            :, :n_intervened
+        ]  # [B,n]
+        A_II = self.A[indices.unsqueeze(2), indices.unsqueeze(1)]  # [B,n,n]
+        s = steer_mask.gather(1, indices)  # [B,n]
+        delta_I = delta.gather(1, indices) * s
+
+        # Replace rows and columns of degenerate concepts by the identity, s.t. their step size is 0
+        A_II = A_II * s.unsqueeze(2) * s.unsqueeze(1) + torch.diag_embed(1 - s)
+
+        AtA = A_II.transpose(1, 2) @ A_II
+        Atd = (A_II.transpose(1, 2) @ delta_I.unsqueeze(-1)).squeeze(-1)
+        # Damping relative to the scale of the steered concepts
+        lam = self.ridge * (AtA.diagonal(dim1=1, dim2=2) * s).sum(1) / s.sum(1).clamp_min(1)
+        eye = torch.eye(n_intervened, dtype=AtA.dtype, device=AtA.device)
+        alpha_I = torch.linalg.solve(
+            AtA + lam[:, None, None] * eye, Atd.unsqueeze(-1)
+        ).squeeze(-1)
+
+        return alpha.scatter(1, indices, alpha_I * s)

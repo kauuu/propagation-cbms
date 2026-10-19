@@ -464,6 +464,7 @@ class CBM(nn.Module):
         c_true=None,
         validation=False,
         concepts_train_ar=False,
+        return_intermediate=False,
     ):
         """
         Perform a forward pass through one of the baselines.
@@ -477,12 +478,14 @@ class CBM(nn.Module):
             c_true (torch.Tensor, optional): The ground-truth concept values. Required for "independent" training mode. Default is None.
             validation (bool, optional): Flag indicating whether this is a validation pass. Default is False.
             concepts_train_ar (torch.Tensor, optional): Ground-truth concept values for autoregressive training. Default is False.
+            return_intermediate (bool, optional): Flag indicating whether to also return the encoder representation. Default is False.
 
         Returns:
             tuple: A tuple containing:
                 - c_prob (torch.Tensor): Predicted concept probabilities. Shape: (batch_size, num_concepts)
                 - y_pred_logits (torch.Tensor): Logits for the target variable. Shape: (batch_size, label_dim)
                 - c (torch.Tensor): Predicted hard concept values (if method permits, otherwise the concept representation). Shape: (batch_size, num_concepts, num_monte_carlo) for MCMC sampling or (batch_size, num_concepts) otherwise.
+                - intermediate (torch.Tensor, optional): Encoder representation h(x). Shape: (batch_size, n_features). Returned if `return_intermediate` is True.
         """
 
         # Get intermediate representations
@@ -642,6 +645,8 @@ class CBM(nn.Module):
             # If CEM: c are predicte embeddings, if AR: c are ground truth concepts
             y_pred_logits = self.head(c)
 
+        if return_intermediate:
+            return c_prob, y_pred_logits, c, intermediate
         return c_prob, y_pred_logits, c
 
     def intervene(

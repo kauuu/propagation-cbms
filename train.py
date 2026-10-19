@@ -289,7 +289,7 @@ def train(config):
     )
 
     if config.train_only:
-        wandb.finish(quiet=True)
+        wandb.finish()
         return None
 
     # Intervention curves
@@ -298,7 +298,7 @@ def train(config):
         train_loader, test_loader, model, metrics, t_epochs, config, loss_fn, device
     )
 
-    wandb.finish(quiet=True)
+    wandb.finish()
     return None
 
 

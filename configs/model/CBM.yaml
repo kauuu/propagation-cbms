@@ -12,4 +12,9 @@ concept_learning: 'hard' # Concept Bottleneck Model baseline, either hard {0,1} 
 #         Policy
 # --------------------------
 inter_policy: 'random,prob_unc' # Comma-separated intervention policies to determine which concept to intervene. Combinable options: ['random','prob_unc']
-inter_strategy: 'simple_perc,emp_perc' # Comma-separated intervention strategies to determine how to perform interventions. Automatically set to 'hard' if using hard CBM ['simple_perc', 'emp_perc']
+inter_strategy: 'simple_perc,emp_perc' # Comma-separated intervention strategies to determine how to perform interventions. Automatically set to 'hard' if using hard CBM without propagation. With steering propagation, they define the target confidence to steer intervened-on concepts to ['simple_perc', 'emp_perc']
+
+# Propagation
+inter_propagation: 'none' # Comma-separated propagation of interventions to other concepts by steering the encoder representation along mean-difference concept directions. 'steer_independent' computes each concept's step size separately, 'steer_joint' solves for all step sizes jointly ['none', 'steer_independent', 'steer_joint']
+steer_eps: 1.0e-6 # Concepts whose predictor is not aligned with their steering direction (w_k·v_k below this) are not steered
+steer_ridge: 1.0e-3 # Relative ridge damping of the joint solve in 'steer_joint'
