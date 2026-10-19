@@ -1,1 +1,2 @@
-data_path: '../datasets/'  # Directory of data
+data_path: "/cluster/dataset/vogtlab/Projects/CBM" # Directory of data in biomed cluster
+

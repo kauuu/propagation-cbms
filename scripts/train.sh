@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --job-name=SCBM
-#SBATCH --output="/path/to/output" 
+#SBATCH --output="logs/%x_%j.out" 
 #SBATCH --cpus-per-task=2
 #SBATCH --time=7-00:00:00
 #SBATCH -p gpu
@@ -9,7 +9,7 @@
 
 source ~/.bashrc
 conda deactivate
-conda activate scbm
-cd /path/to/scbm/directory
+conda activate propagation-cbms
+cd ~/thesis/propagation-cbms
 
 python -u train.py "$@"

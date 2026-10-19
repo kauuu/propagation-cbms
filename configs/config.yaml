@@ -1,5 +1,5 @@
-experiment_name: 'experiments' # Name of the experiment
-experiment_dir: './experiments/'  # Directory to potentially save the model to
+experiment_name: "experiments" # Name of the experiment
+experiment_dir: "./experiments/" # Directory to potentially save the model to
 
 seed: 0 # Random seed
 workers: 2 # Number of workers for data loading
@@ -7,6 +7,6 @@ save_model: False # Whether to save the model. Set to True for inspecting models
 train_only: False # Whether to train the model only and exit before performing interventions [True, False]
 
 logging:
-  project: 'SCBM' # Name of the wandb project
-  mode: 'disabled' # Whether to log to wandb [online, offline, disabled]
+  project: "propagateCBM" # Name of the wandb project
+  mode: "disabled" # Whether to log to wandb [online, offline, disabled]
   entity: "your_entity" # Your wandb entity
