@@ -572,11 +572,11 @@ class Custom_Metrics(Metric):
             c_metrics, _ = calc_concept_metrics(
                 c_true.numpy(), c_pred_probs_list, config.data
             )
-            metrics = (
-                metrics
-                | {f"y_{k}": v for k, v in y_metrics.items()}
-                | {f"c_{k}": v for k, v in c_metrics.items()}
-            )  # | c_metrics_per_concept # Update dict
+            metrics = {
+                **metrics,
+                **{f"y_{k}": v for k, v in y_metrics.items()},
+                **{f"c_{k}": v for k, v in c_metrics.items()},
+            }  # | c_metrics_per_concept # Update dict (dict unpacking instead of | for Python 3.8 compatibility)
 
         return metrics
 
